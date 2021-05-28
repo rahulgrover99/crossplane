@@ -26,8 +26,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/utils/pointer"
 
 	corev1 "k8s.io/api/core/v1"
@@ -65,10 +67,10 @@ func TestSomething(t *testing.T) {
 					return err
 				}
 
-				// dc, err := dynamic.NewForConfig(cfg)
-				// if err != nil {
-				// 	return err
-				// }
+				dc, err := dynamic.NewForConfig(cfg)
+				if err != nil {
+					return err
+				}
 
 				prv := &v1.Provider{
 					ObjectMeta: metav1.ObjectMeta{Name: "provider-nop"},
@@ -145,8 +147,7 @@ func TestSomething(t *testing.T) {
 						}},
 					},
 				}
-				// XRDs take a while to delete, so we try a few times in case creates are
-				// failing due to an old XRD hanging around.
+
 				if err := wait.PollImmediate(10*time.Second, 90*time.Second, func() (done bool, err error) {
 					if err := c.Create(ctx, xrd); err != nil {
 						t.Logf("Create XRD %q: %v", xrd.GetName(), err)
@@ -299,7 +300,7 @@ func TestSomething(t *testing.T) {
 					t.Logf("Deleted composition %q", comp.GetName())
 				})
 
-				// nopRes := schema.GroupVersionResource{Group: "nop.example.org", Version: "v1alpha1", Resource: "nopresources"}
+				nopRes := schema.GroupVersionResource{Group: "nop.example.org", Version: "v1alpha1", Resource: "nopresources"}
 
 				nopresource := &unstructured.Unstructured{
 					Object: map[string]interface{}{
@@ -314,25 +315,45 @@ func TestSomething(t *testing.T) {
 					},
 				}
 
-				if err := c.Create(ctx, nopresource); err != nil {
-					t.Fatalf("Create nop-example %q: %v", nopresource.GetName(), err)
-				}
-				// res, err := dc.Resource(nopRes).Namespace("default").Create(context.TODO(), nopresource, metav1.CreateOptions{})
+				res, err := dc.Resource(nopRes).Namespace("default").Create(context.TODO(), nopresource, metav1.CreateOptions{})
 				if err != nil {
 					t.Fatalf("Create nop-example %q: %v", nopresource.GetName(), err)
 				}
 
-				t.Logf("Created nop-example %q", nopresource.GetName())
+				t.Logf("Created nop-example %q %v", res.GetName(), res.GetNamespace())
 
 				if err := wait.PollImmediate(10*time.Second, 90*time.Second, func() (done bool, err error) {
-					// if result, err := dc.Resource(nopRes).Namespace(res.GetNamespace()).Get(context.TODO(), res.GetName(), metav1.GetOptions{}); err != nil {
-					// 	return false, err
-					// }
+					d, err := dc.Resource(nopRes).Namespace("default").Get(context.TODO(), "nop-example", metav1.GetOptions{})
+					if err != nil {
+						t.Fatalf("Get nop-res %q: %v", nopresource.GetName(), err)
+					}
 
-					// c.Get(context.TODO(), types.NamespacedName{Name: res.GetName(), Namespace: res.GetNamespace()}, res)
+					conditionList, found, err := unstructured.NestedSlice(d.Object, "status", "conditions")
 
-					// TODO(rahulgrover99)
-					// Fetch condition of the resource and check if its ready or not
+					n := len(conditionList)
+
+					if err != nil {
+						t.Fatalf("Get nop-example %q: %v", d.GetName(), err)
+					}
+					t.Logf("%v", conditionList)
+
+					if !found || n == 0 {
+						return false, nil
+					}
+
+					// Fetch the latest transaction
+					tmp := conditionList[n-1]
+
+					isReady, _, err := unstructured.NestedString(tmp.(map[string]interface{}), "status")
+
+					if err != nil {
+						t.Fatalf("Get nop-example %q: %v", d.GetName(), err)
+					}
+
+					if isReady != "True" {
+						t.Logf("nop-example %q is not yet Ready", xrd.GetName())
+						return false, nil
+					}
 
 					return true, nil
 				}); err != nil {
@@ -341,10 +362,11 @@ func TestSomething(t *testing.T) {
 
 				t.Cleanup(func() {
 					t.Logf("Cleaning up nop-example %q.", nopresource.GetName())
-					if err := c.Get(ctx, types.NamespacedName{Name: nopresource.GetName()}, nopresource); resource.IgnoreNotFound(err) != nil {
+					if _, err := dc.Resource(nopRes).Namespace("default").Get(context.TODO(), "nop-example", metav1.GetOptions{}); resource.IgnoreNotFound(err) != nil {
 						t.Fatalf("Get nop-example %q: %v", nopresource.GetName(), err)
 					}
-					if err := c.Delete(ctx, nopresource); resource.IgnoreNotFound(err) != nil {
+
+					if err := dc.Resource(nopRes).Namespace("default").Delete(context.TODO(), "nop-example", metav1.DeleteOptions{}); resource.IgnoreNotFound(err) != nil {
 						t.Fatalf("Delete nop-example %q: %v", nopresource.GetName(), err)
 					}
 					t.Logf("Deleted nop-example %q", nopresource.GetName())
